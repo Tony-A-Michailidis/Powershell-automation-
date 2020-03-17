@@ -13,7 +13,7 @@
  #>
  
 Connect-MsolService
-$exclusionList = @("cloud@086gc.onmicrosoft.com", "cloud.reporting@086gc.onmicrosoft.com", "Sync_DFONK1AWVASP046_38980cf09e21@086gc.onmicrosoft.com", "adfs@086gc.onmicrosoft.com", "SV-086gc@086gc.onmicrosoft.com", "SSC-CBS-Reporting@086gc.onmicrosoft.com")
+$exclusionList =  
 $allUsers = Get-MsolUser -All | Where-Object -Property UserPrincipalName -NotIn $exclusionList
 $auth = New-Object -TypeName Microsoft.Online.Administration.StrongAuthenticationRequirement
 $allUsers | 
