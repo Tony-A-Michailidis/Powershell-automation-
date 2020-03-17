@@ -1,0 +1,102 @@
+$connectionName = "AzureRunAsConnection"
+
+$BlobContainers = @(
+    @{
+        ResourceGroupName = "LIBRARY-PROD-RG"
+        StorageAccountName = "dfolibraries"
+        Container = "dev"
+        ReportContainer = "dev"
+        ReportFolder = "reports\"
+        ReportFileName = "DevStorageReport"
+        ReportDate = $False
+    },
+    @{
+        ResourceGroupName = "LIBRARY-PROD-RG"
+        StorageAccountName = "dfolibraries"
+        Container = '$web'
+        ReportContainer = '$web'
+        ReportFolder = "reports\"
+        ReportFileName = "ProdStorageReport"
+        ReportDate = $False
+    }
+);
+
+try
+{
+    # Get the connection "AzureRunAsConnection "
+    $servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
+
+    "Logging in to Azure..."
+    $azureaccount = Add-AzureRmAccount `
+        -ServicePrincipal `
+        -TenantId $servicePrincipalConnection.TenantId `
+        -ApplicationId $servicePrincipalConnection.ApplicationId `
+        -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+}
+catch 
+{
+    if (!$servicePrincipalConnection)
+    {
+        $ErrorMessage = "Connection $connectionName not found."
+        throw $ErrorMessage
+    } 
+    else
+    {
+        Write-Error -Message $_.Exception
+        throw $_.Exception
+    }
+}
+
+foreach($BlobContainer in $BlobContainers)
+{
+    Write-Output "Running report for: $($BlobContainer.ResourceGroupName)\$($BlobContainer.StorageAccountName)\$($BlobContainer.Container)";
+
+    $ResourceGroupName = $BlobContainer.ResourceGroupName;
+    $StorageAccountName = $BlobContainer.StorageAccountName;
+    $Container = $BlobContainer.Container;
+    $ReportContainer = $BlobContainer.ReportContainer;
+    $ReportFolder = $BlobContainer.ReportFolder;
+    $ReportFileName = $BlobContainer.ReportFileName;
+
+    if(!$ReportContainer)
+    {
+        $ReportContainer = $Container;
+    }
+    if(!$ReportFolder)
+    {
+        $ReportFolder = "";
+    }
+    if(!$ReportFileName)
+    {
+        $ReportFileName = "StorageReport";
+    }
+
+    Set-AzureRmCurrentStorageAccount –ResourceGroupname $ResourceGroupName –StorageAccountName $StorageAccountName;
+
+    $Token = $Null;
+    $Blobs = $Null;
+
+    do
+    {
+        $Blobs += Get-AzureStorageBlob -Container $Container -MaxCount 5000  -ContinuationToken $Token
+        $Total += $Blobs.Count
+        if($Blobs.Length -le 0) { Break;}
+        $Token = $Blobs[$blobs.Count -1].ContinuationToken;
+    }
+    While ($Token -ne $Null)
+
+    $todaydate = Get-Date -Format MM-dd-yy;
+    $LogFull = "$ReportFileName.csv";
+    if($BlobContainer.ReportDate)
+    {
+        $LogFull = "$ReportFileName-$todaydate.csv";
+    }
+
+    New-Item -ItemType File -Name $LogFull -Force;
+
+    "Name,LastModified,ContentType,Length" | Out-File -FilePath $LogFull -Append;
+
+    $Blobs | Select-Object Name, LastModified, ContentType, Length | Export-Csv -Path $LogFull -Append;
+
+    Set-AzureStorageBlobContent -File $LogFull -Blob "$ReportFolder$LogFull" -Container $ReportContainer -BlobType "Block" -Verbose -Force;
+}

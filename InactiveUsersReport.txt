@@ -1,0 +1,68 @@
+
+<#
+    .DESCRIPTION
+        Posts to the related Teams channel (URI in the TeamsURI var) user names that haven't RefreshTokensValidFromDateTime in for 90 plus days. One of those security requirements we need to have.
+        90 days is just a number, feel free to adjust. 
+        Need to fix the -notin, somehow it doesn't like it when comparing to an array populated with the contents of a automation acc var. 
+        Inspired by a much more elaborate script that also looks into the groups the user is in : https://office365itpros.com/2019/10/15/report-old-guest-accounts-office365-groups/  
+    .PARAMETER none
+   
+    .NOTES
+        AUTHOR: Tony Michailidis
+        LAST EDIT: 12 Nov 2019
+        EDITOR: Tony Mchailidis         
+#>
+ 
+function loginAzure 
+    {
+        $Conn = Get-AutomationConnection -Name AnalyticsConnection 
+        Connect-AzureAD  -tenantId $Conn.TenantID -CertificateThumbprint $Conn.CertificateThumbprint  -ApplicationId  $Conn.ApplicationID   
+    }
+
+function postToTeams ([string]$teamsMessage)
+{
+    try
+        {
+            $uri = Get-AutomationVariable -Name 'TeamsURI' 
+            $payload1 = @{
+                 "text" = $teamsMessage
+            }
+            $json1 = ConvertTo-Json $payload1    
+            Invoke-RestMethod -uri $uri -Method Post -body $json1 -ContentType 'Application/Json'
+        }
+    Catch
+        {
+            $ErrorMessage = $_.Exception.Message
+            $FailedItem = $_.Exception.ItemName
+            Write-Error "We failed to read $FailedItem. The error message was $ErrorMessage"
+            Break
+        }   
+}
+     
+function GetInactiveUsers 
+{  
+    $topost = ""
+    $numberofdays = 365
+    $exclude = @("cloud@086gc.onmicrosoft.com", "cloud.reporting@086gc.onmicrosoft.com", "Sync_DFONK1AWVASP046_38980cf09e21@086gc.onmicrosoft.com", "adfs@086gc.onmicrosoft.com", "SV-086gc@086gc.onmicrosoft.com", "SSC-CBS-Reporting@086gc.onmicrosoft.com")
+    $MemberUsers = Get-AzureADUser -All $true | ? {$_.UserPrincipalName -notin $exclude }
+    ForEach ($Member in $MemberUsers) 
+    {
+        If (($Member.RefreshTokensValidFromDateTime | New-TimeSpan).Days -gt $numberofdays)        
+        { 
+            $userlink = "<a href='https://portal.azure.com/#blade/Microsoft_AAD_IAM/UserDetailsMenuBlade/Profile/userId/" + $Member.ObjectId + "/adminUnitObjectId/'>" +  $Member.UserPrincipalName + "</a>"                                                                 
+            $dd = $Member.RefreshTokensValidFromDateTime             
+            $topost += "- "+ $userlink +" last refresh was on: " + $dd + "`n`n"
+        }
+    }
+    If ($topost -ne "")
+    {
+        postToTeams("The following users haven't had their authorization Tokens refreshed for more than $numberofdays days: `n`n$topost`n`nCheck to see if they are still with the department")
+    }
+} 
+
+loginAzure
+GetInactiveUsers  
+
+
+ 
+ 

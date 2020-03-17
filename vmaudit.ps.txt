@@ -1,0 +1,312 @@
+<#
+    .DESCRIPTION
+        Retrieves some Azure advice from the logs for each VM and posts to the related alerts channel what to do with settings to make VMs a bit
+        more security aware. Code is to be written for humans to read. 
+        Limited to just the mission critical VMs for now:
+        'cloud-dc2-vm', 'cloud-awx-vm', 'FGCAC-A', 'FGCAC-B', 'FGCAEVM', 'cloud-rdg1-vm', 'linuxjumpserver01' 
+
+
+    .PARAMETER none
+   
+    .NOTES
+        AUTHOR: Tony Michailidis
+        LAST EDIT: 22 Oct 2019
+        EDITOR: Tony Mchailidis
+#>
+
+function loginAzure 
+{
+    $connectionName = "AzureRunAsConnection"
+    try
+        {
+            $servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
+            "Logging in to Azure..."
+            $azureaccount = Add-AzureRmAccount `
+            -ServicePrincipal `
+            -TenantId $servicePrincipalConnection.TenantId `
+            -ApplicationId $servicePrincipalConnection.ApplicationId `
+            -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+        }
+    catch 
+        {
+            if (!$servicePrincipalConnection)
+                {
+                    $ErrorMessage = "Connection $connectionName not found."
+                    throw $ErrorMessage
+                } 
+            else
+                {
+                    Write-Error -Message $_.Exception  
+                    throw $_.Exception
+                }
+       }
+}
+
+function postToTeams ([string]$teamsMessage)
+{
+    try
+        {
+            $uri = Get-AutomationVariable -Name 'TeamsURI' 
+            $payload1 = @{
+                "text" = $teamsMessage
+            }
+            $json1 = ConvertTo-Json $payload1    
+            Invoke-RestMethod -uri $uri -Method Post -body $json1 -ContentType 'Application/Json'
+        }
+    Catch
+        {
+            $ErrorMessage = $_.Exception.Message
+            $FailedItem = $_.Exception.ItemName
+            Write-Error "We failed to read $FailedItem. The error message was $ErrorMessage"
+            Break
+        }   
+}
+
+$Conn = Get-AutomationConnection -Name 'AnalyticsConnection'
+$null1 = Add-AzureRMAccount -ServicePrincipal -Tenant $Conn.TenantID -ApplicationID $Conn.ApplicationID -CertificateThumbprint $Conn.CertificateThumbprint 
+$queryResults = $null
+$auditPost = $null
+$logPost = $null
+$securityPost = $null
+$mediaPost = $null
+$AccessPost = $null
+$passwordsPost = $null
+$networkPost = $null
+$CommunicationsPost = $null
+$systemPost = $null
+$adminPost = $null
+$FirewallPost = $null
+$ContainersPost = $null
+$SSHPost = $null
+$otherPost = $null
+
+ 
+$queryResults = $null  
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "log file" or Description contains " log " or Description contains " logging " or Description contains "logrotate" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $logPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}    
+
+$queryResults = $null  
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where  AnalyzeResult == "Failed" | where Description contains "Audit" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $auditPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}    
+
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where  AnalyzeResult == "Failed" | where Description contains "TLS" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $securityPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}    
+
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "drives" or Description contains "Autoplay" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $mediaPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}    
+ 
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "drives" or Description contains "Remote Assistance" or Description contains "Assistance" or Description contains "Remote" or Description contains "guest" or Description contains "Account" or Description contains "elevation" or Description contains "Traverse" or Description contains "log on" or Description contains "login" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $AccessPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}    
+
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "password" or Description contains "feedback" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $passwordPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}    
+
+$queryResults = $null  
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "network" or Description contains "NTP" or Description contains "forwarding" or Description contains "Samba" or Description contains "portmap" or Description contains "MPSSVC" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $networkPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}  
+
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "RPC" or Description contains "communucation" or Description contains "Postfix" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $CommunicationsPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}  
+ 
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "AutoRun" or Description contains "definition" or Description contains "updates" or Description contains "File " or Description contains "time" or Description contains "rsync" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $systemPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}  
+
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "Administrator"  | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $adminPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}  
+
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "Firewall" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $FirewallPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}  
+
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "Docker" or Description contains "Ensure live restore is Enabled" or Description contains "container" or Description contains "daemon.json" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $ContainersPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}  
+
+$queryResults = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where Description contains "SSH" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $SSHPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}  
+
+$queryResults = $null  
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'SecurityBaseline | where SubscriptionId == "a09b97a0-4b61-469d-ab88-1f77727b8c08" | where Resource == "cloud-dc2-vm" or Resource == "cloud-dc1-vm"  or Resource == "cloud-awx-vm"  or Resource == "FGCAC-A" or Resource == "FGCAC-B" or Resource == "FGCAEVM" or Resource == "cloud-rdg1-vm" or Resource == "linuxjumpserver01" | where RuleSeverity == "Critical" | where  AnalyzeResult == "Failed"  | where Description !contains "MPSSVC" and  Description !contains "Audit" and  Description !contains "log file" and  Description !contains " log " and  Description !contains " logging " and  Description !contains "logrotate" and  Description !contains "audits" and  Description !contains "auditd"  and  Description !contains "TLS"  and  Description !contains "drives" and  Description !contains "AutoPlay" and  Description !contains "Remote Assistance" and  Description !contains "Assistance" and  Description !contains "Remote" and  Description !contains "guest" and  Description !contains "Account" and  Description !contains "elevation" and  Description !contains "Traverse"  and  Description !contains "log on" and  Description !contains "login" and  Description !contains "passwords" and  Description !contains "password" and  Description !contains "feedback"  and  Description !contains "NTP" and  Description !contains "Network" and  Description !contains "IP forwarding" and  Description !contains "Samba" and  Description !contains "portmap"  and  Description !contains "RPC"  and  Description !contains "communication" and  Description !contains "Postfix"  and  Description !contains "AutoRun" and  Description !contains "definition"   and  Description !contains "updates" and  Description !contains "File"  and  Description !contains "time" and  Description !contains "rsync"  and  Description !contains "Administrator"  and  Description !contains "Firewall" and  Description !contains "Docker"  and  Description !contains "Ensure live restore is Enabled" and  Description !contains "container"  and  Description !contains "daemon.json"  and  Description !contains "SSH"  and  Description !contains "postfix" | distinct Resource, ResourceId, Description, ActualResult | sort by Resource asc' -Timespan (New-TimeSpan -Hours 24) 
+$queryResults = $queryResults.Results
+If ($queryResults -ne $null) 
+{
+    foreach ($row in $queryResults.'<>3__rows') 
+    {
+        $otherPost += "- **Resource:** <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> **Issue:** " + $row.Description + " **Resolution:** "+ $row.ActualResult + "`n" 
+    }
+}    
+
+"dubug info"
+"auditPost " + $auditPost  + "`n"
+"logPost "  + $logPost  + "`n"
+"securityPost " + $securityPost  + "`n"
+"mediaPost " + $mediaPost  + "`n"
+"AccessPost " + $AccessPost  + "`n"
+"passwordsPost " + $passwordsPost  + "`n"
+"networkPost " + $networkPost  + "`n"
+"CommunicationsPost " + $CommunicationsPost  + "`n"
+"systemPost " + $systemPost  + "`n"
+"adminPost "  + $adminPost  + "`n"
+"FirewallPost " + $FirewallPost  + "`n"
+"ContainersPost " + $ContainersPost  + "`n"
+"SSHPost " + $SSHPost  + "`n"
+"OtherPost " + $otherPost  + "`n"
+
+        if ($auditPost -ne $null)
+        {
+           postToTeams ("The following **Audit** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$auditPost`n`n")  
+        }
+        if ($logPost -ne $null)
+        {
+           postToTeams ("The following **Logging** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$logPost`n`n")  
+        }
+
+        if ($securityPost -ne $null)  
+        {
+            postToTeams ("The following **Security configuration** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$securityPost`n`n")  
+        }
+        if ($mediaPost -ne $null)  
+        {
+            postToTeams ("The following **Media** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$mediaPost`n`n")  
+        }
+        if ($AccessPost -ne $null)
+        {
+            postToTeams ("The following **Access** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$AccessPost`n`n")  
+        }
+        if ($passwordsPost -ne $null)
+        {
+            postToTeams ("The following **Local Password** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$passwordsPost`n`n")  
+        }   
+        if ($networkPost -ne $null)
+        {
+            postToTeams ("The following **Network** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$networkPost`n`n")  
+        }
+        if ($CommunicationsPost -ne $null)  
+        {
+            postToTeams ("The following **Protocol** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$CommunicationsPost`n`n")  
+        }
+        if ($systemPost -ne $null)  
+        {
+            postToTeams ("The following **System** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$systemPost`n`n")  
+        }
+        if ($adminPost -ne $null)   
+        {
+            postToTeams ("The following **Administration** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$adminPost`n`n")  
+        }
+        if ($FirewallPost -ne $null) 
+        {
+            postToTeams ("The following **Local Firewall** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$FirewallPost`n`n")  
+        }
+        if ($ContainersPost -ne $null)  
+        {
+            postToTeams ("The following **Container** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$ContainersPost`n`n")  
+        }
+        if ($SSHPost -ne $null)  
+        {
+            postToTeams ("The following **Remote login** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$SSHPost`n`n")  
+        }  
+        if ($otherPost -ne $null)  
+        {
+            postToTeams ("The following **Miscellaneous configuration** issues have been identified by Azure on mission critical VMs (resolutions are also shown): `n`n$otherPost`n`n")  
+        }  
+        
+

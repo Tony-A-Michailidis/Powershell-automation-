@@ -1,0 +1,107 @@
+#Generate a sitemap for a blob container.
+$connectionName = "AzureRunAsConnection"
+
+$BlobContainers = @(
+    @{
+        ResourceGroupName = "LIBRARY-PROD-RG"
+        StorageAccountName = "dfolibraries"
+        Container = '$web'
+    }
+);
+
+try
+{
+    # Get the connection "AzureRunAsConnection "
+    $servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
+
+    "Logging in to Azure..."
+    $azureaccount = Add-AzureRmAccount `
+        -ServicePrincipal `
+        -TenantId $servicePrincipalConnection.TenantId `
+        -ApplicationId $servicePrincipalConnection.ApplicationId `
+        -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+}
+catch 
+{
+    if (!$servicePrincipalConnection)
+    {
+        $ErrorMessage = "Connection $connectionName not found."
+        throw $ErrorMessage
+    } 
+    else
+    {
+        Write-Error -Message $_.Exception
+        throw $_.Exception
+    }
+}
+
+foreach($BlobContainer in $BlobContainers)
+{
+    Write-Output "Running report for: $($BlobContainer.ResourceGroupName)\$($BlobContainer.StorageAccountName)\$($BlobContainer.Container)";
+
+    $ResourceGroupName = $BlobContainer.ResourceGroupName;
+    $StorageAccountName = $BlobContainer.StorageAccountName;
+    $Container = $BlobContainer.Container;
+
+    Set-AzureRmCurrentStorageAccount –ResourceGroupname $ResourceGroupName –StorageAccountName $StorageAccountName;
+
+    $Token = $Null;
+    $Blobs = $Null;
+    
+    do
+    {
+        $Blobs += Get-AzureStorageBlob -Container $Container -MaxCount 5000  -ContinuationToken $Token
+
+        if($Blobs.Length -le 0) { Break;}
+        $Token = $Blobs[$blobs.Count -1].ContinuationToken;
+    }
+    While ($Token -ne $Null)
+
+    $counter = [pscustomobject] @{ Value = 0 }
+    $groupSize = 40000
+
+    $groups = $Blobs | Where-Object {$_.Name.EndsWith(".pdf", "CurrentCultureIgnoreCase") -And !($_.Name -Match "_vti_cnf/")} | Group-Object -Property { [math]::Floor($counter.Value++ / $groupSize) }
+
+    $siteIndexStringBuilder = [System.Text.StringBuilder]::new()
+
+    [void]$siteIndexStringBuilder.AppendLine('<?xml version="1.0" encoding="UTF-8"?>')
+    [void]$siteIndexStringBuilder.AppendLine('<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">')
+
+    $today = Get-Date
+
+    foreach($group in $groups)
+    {
+        $sb = [System.Text.StringBuilder]::new()
+        [void]$sb.AppendLine( '<?xml version="1.0" encoding="UTF-8"?>' )
+        [void]$sb.AppendLine( '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' )
+
+        foreach($blob in $group.Group)
+        {
+            if($blob.Name.EndsWith(".pdf", "CurrentCultureIgnoreCase") -And !($blob.Name -Match "_vti_cnf/") -And !($blob.Name -Match " "))
+            {
+                [void]$sb.AppendLine( '  <url>' )
+                [void]$sb.AppendLine( "    <loc>https://waves-vagues.dfo-mpo.gc.ca/$([uri]::EscapeUriString($blob.Name))</loc>" )
+                [void]$sb.AppendLine( "    <lastmod>$($blob.LastModified.DateTime.ToString('yyyy-MM-dd'))</lastmod>" )
+                [void]$sb.AppendLine( "    <changefreq>yearly</changefreq>" )
+                [void]$sb.AppendLine( '  </url>' )
+            }
+        }
+        [void]$sb.AppendLine( '</urlset>' )
+
+        $FileName = "sitemap_$($group.Name).xml"
+        New-Item -ItemType File -Name $FileName -Force;
+        $sb.ToString() |  Out-File -FilePath $FileName -Append;
+        Set-AzureStorageBlobContent -File $FileName -Blob "$FileName" -Container $Container -BlobType "Block" -Verbose -Force;
+
+        [void]$siteIndexStringBuilder.AppendLine("  <sitemap>")
+        [void]$siteIndexStringBuilder.AppendLine("    <loc>https://waves-vagues.dfo-mpo.gc.ca/$FileName</loc>")
+        [void]$siteIndexStringBuilder.AppendLine("    <lastmod>$($today.ToString('yyyy-MM-dd'))</lastmod>")
+        [void]$siteIndexStringBuilder.AppendLine("  </sitemap>")
+    }
+
+    [void]$siteIndexStringBuilder.AppendLine('</sitemapindex>')
+
+    New-Item -ItemType File -Name "siteIndex.xml" -Force;
+    $siteIndexStringBuilder.ToString() |  Out-File -FilePath "siteIndex.xml" -Append;
+    Set-AzureStorageBlobContent -File "siteIndex.xml" -Blob "siteIndex.xml" -Container $Container -BlobType "Block" -Verbose -Force;
+}

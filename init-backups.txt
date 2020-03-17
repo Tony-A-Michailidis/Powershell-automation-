@@ -1,0 +1,323 @@
+<#
+    .DESCRIPTION
+        Gets or creates the Recovery Services Vault (and policies)
+        in the specified RG and links VMs within that RG to vault
+        policies, using the VM's tags
+
+        Script-run, Find-BackupVMs.ps1 
+
+    .NOTES
+        Version: 2.0
+        AUTHOR: Alex Imray Papineau
+        LAST EDIT: 29 January 2020
+        EDITOR: Alex Imray Papineau
+#>
+
+Param(
+    [Parameter(Mandatory = $false, HelpMessage = `
+        "Name of the resource group in which to initialize backups")]
+    [string] $ResourceGroupName = ""
+)
+
+# Prevents runbook from continuing execution if there's an error - Alex
+$ErrorActionPreference = "Stop"
+
+# Logging in -> Get connection and use for Az login
+$Connection = Get-AutomationConnection -Name "AzureRunAsConnection"
+$AzureProfile = Connect-AzAccount `
+    -Tenant $Connection.TenantId `
+    -CertificateThumbprint $Connection.CertificateThumbprint `
+    -ApplicationId $Connection.ApplicationId `
+    -ServicePrincipal
+$AzureProfile.Context.Subscription
+
+# Retrieve necessary automation variables
+$autoAccountName = Get-AutomationVariable -Name 'AutoAccountName'
+$autoAccountRG = Get-AutomationVariable -Name 'AutoAccountRG'
+
+"Retrieved automation variables:`nAutomation account name: {0}`nAutomation account RG: {1}" `
+    -f $autoAccountName, $autoAccountRG
+
+# Get VMs
+$backupVMs = @(Get-AzVM -ResourceGroupName $ResourceGroupName)
+"Retreived {0} VMs in '{1}' that need backing up..." -f $backupVMs.Length, $ResourceGroupName
+
+# Get all regions that require a backup vault, and sort VMs by region
+$regionVaults = @{}
+$regionVMs = @{}
+foreach ($bvm in $backupVMs)
+{
+    $tagsHash = [System.Collections.Specialized.CollectionsUtil]::CreateCaseInsensitiveHashtable($bvm.Tags)
+
+    if ($tagsHash.Keys -inotcontains 'backup')
+    { continue }
+
+    if ($regionVMs.ContainsKey($bvm.Location))
+    { $regionVMs[$bvm.Location] += $bvm }
+
+    if ($regionVaults.ContainsKey($bvm.Location))
+    { continue }
+
+    $regionVaults.Add($bvm.Location, $null)
+    $regionVMs.Add($bvm.Location, @())
+    $regionVMs[$bvm.Location] += $bvm
+}
+
+# Get vaults and sort into regions needing backup
+$backupVaults = @(Get-AzRecoveryServicesVault -ResourceGroupName $ResourceGroupName)
+foreach ($bvault in $backupVaults)
+{
+    if (!$regionVaults.ContainsKey($bvault.Location))
+    { continue }
+
+    if ($null -ne $regionVaults[$bvault.Location])
+    { continue }
+
+    $regionVaults[$bvault.Location] = $bvault
+}
+
+# Check if any regions still need a backup vault
+$backupRegions = @()
+foreach ($reg in $regionVaults.Keys) 
+{ $backupRegions += $reg }
+foreach ($region in $backupRegions)
+{
+    if ($null -ne $regionVaults[$region])
+    {
+        "Region '{0}' in '{1}' serviced by backup vault '{2}'" `
+            -f $region, $ResourceGroupName, $regionVaults[$region].Name
+    }
+    else
+    {
+        "Region '{0}' in '{1}' has no backup vault! Creating..." `
+            -f $region, $ResourceGroupName
+
+        $regionShort = "cac"
+        if ($region -eq "canadaeast")
+        { $regionShort = "cae" }
+        $vaultName = $ResourceGroupName.Replace("-RG", "-" + $regionShort + "Vault" );
+
+        $runbookArgs = @{ "VaultName" = $vaultName; `
+            "VaultRG" = $ResourceGroupName; "VaultRegion" = $region }
+        (Start-AzAutomationRunbook `
+            -Name "Init-Vault" `
+            -AutomationAccountName $autoAccountName `
+            -ResourceGroupName $autoAccountRG `
+            -Parameters $runbookArgs `
+            -Wait) | Out-Null
+
+        $regionVaults[$region] = Get-AzRecoveryServicesVault `
+            -ResourceGroupName $ResourceGroupName -Name $vaultName
+        if ($null -eq $regionVaults[$region])
+        {
+            "Failed to create backup vault in '{0}'. Skipping region..." `
+                -f $ResourceGroupName
+            $regionVaults.Remove($region)
+        }
+        else
+        {
+            "New vault '{0}' created in '{1}' in '{2}'" `
+                -f $regionVaults[$region].Name, $region, $ResourceGroupName
+        }
+    }
+}
+
+# Link VMs
+foreach ($region in $regionVaults.Keys)
+{
+    if ($regionVMs[$region].Length -le 0)
+    { continue }
+
+    $vaultToLink = $regionVaults[$region]
+
+    "Linking VMs in region '{0}' with vault '{1}'..." -f $region, $vaultToLink.Name
+    
+    # Init variables
+    $policies = $null
+    $dfoDaily = $null
+    $dfoWeekly = $null
+    $dfoMonthly = $null
+    $dfoLongDaily = $null
+    $dfoLongMonthly = $null
+    $container = $null
+    $bkItem = $null
+
+    # Retrieve policies
+    $policies = @(Get-AzRecoveryServicesBackupProtectionPolicy `
+        -VaultId $vaultToLink.ID)
+    $dfoDaily = $policies | Where-Object `
+        -Property 'Name' -Value 'DFODaily' -EQ
+    $dfoWeekly = $policies | Where-Object `
+        -Property 'Name' -Value 'DFOWeekly' -EQ
+    $dfoMonthly = $policies | Where-Object `
+        -Property 'Name' -Value 'DFOMonthly' -EQ
+    $dfoLongDaily = $policies | Where-Object `
+        -Property 'Name' -Value 'DFOLongDaily' -EQ
+    $dfoLongMonthly = $policies | Where-Object `
+        -Property 'Name' -Value 'DFOLongMonthly' -EQ
+
+    # Process VMs
+    $vaultSummary = ("Finished setting vault {0}'s VMs." -f $vaultToLink.Name `
+        + "`nActivity summary:")
+    foreach ($vm in $regionVMs[$region])
+    {
+        # "Processing '{0}' in {1}..." -f $vm.Name, $region
+        $vaultSummary += "`n- '{0}' " -f $vm.Name
+
+        # Based on backup tag existence and backup container
+        # existence, do 1 of 4 actions
+        $container = Get-AzRecoveryServicesBackupContainer `
+            -VaultId $vaultToLink.ID -ContainerType 'AzureVM' `
+            -BackupManagementType 'AzureVM' -FriendlyName $vm.Name
+
+        if ($vm.Tags.Keys -notcontains 'Backup')
+        {
+            # No backup tag: Add with value None or Custom,
+            # depending on whether backup container exists
+            if ($null -eq $container)
+            {
+                $vm.Tags.Add('Backup','None')
+                $vaultSummary += " added Backup:None tag (1-1)"
+            }
+            else
+            {
+                $vm.Tags.Add('Backup','Custom')
+                $vaultSummary += " added Backup:Custom tag (2-1)"
+            }
+            Set-AzResource -Tag $vm.Tags `
+                -ResourceId $vm.Id -Force -AsJob | Out-Null
+        }
+        else
+        {
+            # Tag exists but backup container is null:
+            # enable/add policy (specific version of cmdlet)
+            if ($null -eq $container)
+            {
+                $startBackup = $false
+
+                if ($vm.Tags.Backup.ToLower() -eq 'daily')
+                {
+                    Enable-AzRecoveryServicesBackupProtection `
+                        -VaultId $vaultToLink.ID -Name $vm.Name `
+                        -ResourceGroupName $vaultToLink.ResourceGroupName `
+                        -Policy $dfoDaily | Out-Null
+                    $vaultSummary += " newly linked to daily policy (3-1)"
+                    $startBackup = $true
+                }
+                elseif ($vm.Tags.Backup.ToLower() -eq 'weekly')
+                {
+                    Enable-AzRecoveryServicesBackupProtection `
+                        -VaultId $vaultToLink.ID -Name $vm.Name `
+                        -ResourceGroupName $vaultToLink.ResourceGroupName `
+                        -Policy $dfoWeekly | Out-Null
+                    $vaultSummary += " newly linked to weekly policy (3-2)"
+                    $startBackup = $true
+                }
+                elseif ($vm.Tags.Backup.ToLower() -eq 'monthly')
+                {
+                    Enable-AzRecoveryServicesBackupProtection `
+                        -VaultId $vaultToLink.ID -Name $vm.Name `
+                        -ResourceGroupName $vaultToLink.ResourceGroupName `
+                        -Policy $dfoMonthly | Out-Null
+                    $vaultSummary += " newly linked to monthly policy (3-3)"
+                    $startBackup = $true
+                }
+                else
+                {
+                    if ($vm.Tags.Backup.ToLower() -ne 'none')
+                    {
+                        $vm.Tags.Backup = "None"
+                        Set-AzResource -Tag $vm.Tags `
+                            -ResourceId $vm.Id -Force -AsJob
+                        $vaultSummary += " updated Backup:None tag (3-4)"
+                    }
+                }
+
+                if ($startBackup -eq $true)
+                {
+                    $container = Get-AzRecoveryServicesBackupContainer `
+                        -VaultId $vaultToLink.ID -ContainerType 'AzureVM' `
+                        -BackupManagementType 'AzureVM' -FriendlyName $vm.Name
+
+                    $bkItem = Get-AzRecoveryServicesBackupItem `
+                        -VaultId $vaultToLink.ID -Container $container `
+                        -WorkloadType AzureVM
+
+                    Backup-AzRecoveryServicesBackupItem `
+                        -VaultId $vaultToLink.ID -Item $bkItem | Out-Null
+                    $vaultSummary += " (started backup)"
+                }
+            }
+            # Tag and container both exist: get backup item and
+            # update policy to match tag (specific version of cmdlet)
+            else
+            {
+                $bkItem = Get-AzRecoveryServicesBackupItem `
+                    -VaultId $vaultToLink.ID -Container $container `
+                    -WorkloadType AzureVM
+
+                if ($null -eq $bkItem)
+                {
+                    $vm.Tags.Backup = "Custom"
+                    Set-AzResource -Tag $vm.Tags `
+                        -ResourceId $vm.Id -Force -AsJob | Out-Null
+                    $vaultSummary += (" backup item missing " `
+                        + "(likely in different vault),")
+                }
+
+                if ($vm.Tags.Backup.ToLower() -eq 'daily')
+                {
+                    Enable-AzRecoveryServicesBackupProtection `
+                        -Policy $dfoDaily -VaultId $vaultToLink.ID `
+                        -Item $bkItem | Out-Null
+                    $vaultSummary += " linked to daily policy (4-1)"
+                }
+                elseif ($vm.Tags.Backup.ToLower() -eq 'weekly')
+                {
+                    Enable-AzRecoveryServicesBackupProtection `
+                        -Policy $dfoWeekly -VaultId $vaultToLink.ID `
+                        -Item $bkItem | Out-Null
+                    $vaultSummary += " linked to weekly policy (4-2)"
+                }
+                elseif ($vm.Tags.Backup.ToLower() -eq 'monthly')
+                {
+                    Enable-AzRecoveryServicesBackupProtection `
+                        -Policy $dfoMonthly -VaultId $vaultToLink.ID `
+                        -Item $bkItem | Out-Null
+                    $vaultSummary += " linked to monthly policy (4-3)"
+                }
+                elseif ($vm.Tags.Backup.ToLower() -eq 'ldaily')
+                {
+                    Enable-AzRecoveryServicesBackupProtection `
+                        -Policy $dfoLongDaily -VaultId $vaultToLink.ID `
+                        -Item $bkItem | Out-Null
+                    $vaultSummary += " linked to long daily policy (4-4)"
+                }
+                elseif ($vm.Tags.Backup.ToLower() -eq 'lmonthly')
+                {
+                    Enable-AzRecoveryServicesBackupProtection `
+                        -Policy $dfoLongMonthly -VaultId $vaultToLink.ID `
+                        -Item $bkItem | Out-Null
+                    $vaultSummary += " linked to long monthly policy (4-5)"
+                }
+                elseif ($vm.Tags.Backup.ToLower() -eq 'none')
+                {
+                    Disable-AzRecoveryServicesBackupProtection `
+                        -VaultId $vaultToLink.ID -Item $bkItem `
+                        -RemoveRecoveryPoints -Force | Out-Null
+                    $vaultSummary += " unlinked from backup policy (4-6)"
+                }
+                elseif ($vm.Tags.Backup.ToLower() -eq 'custom')
+                { $vaultSummary += " unchanged (4-7)" }
+                else
+                {
+                    $vm.Tags.Backup = 'Custom'
+                    Set-AzResource -Tag $vm.Tags `
+                        -ResourceId $vm.Id -Force -AsJob | Out-Null
+                    $vaultSummary += " updated Backup:Custom tag (4-6)"
+                }
+            }
+        }
+    }
+    $vaultSummary
+}

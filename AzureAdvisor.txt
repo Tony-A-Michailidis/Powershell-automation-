@@ -1,0 +1,97 @@
+<#
+    .DESCRIPTION
+        This runbook looks into the current Azure advisor recommendations for Cost, High Availability, Performance, Security and Operational Excellence advise. Take the 
+        advise with a grain of salt... since the current DFO ecosystem may not necessarily benefit from specific recommendations. The runbook posts the recommendations
+        to the usual alerts channel. 
+    
+    .PARAMETER none
+   
+    .NOTES
+        AUTHOR: Tony Michailidis
+        LAST EDIT: 4 Nov 2019
+        EDITOR: Tony Mchailidis         
+#>
+ 
+function loginAzure 
+    {
+        try
+            {
+                $TenantId =  Get-AutomationVariable -Name 'TenantId'
+                $CertificateThumb = Get-AutomationVariable -Name 'CertificateThumb'
+                $ApplicationId =  Get-AutomationVariable -Name 'ApplicationId'
+                Connect-AzAccount -Tenant $TenantId -CertificateThumbprint $CertificateThumb -ApplicationId $ApplicationId -ServicePrincipal | Out-Null
+            }
+        catch 
+            {
+                Write-Error -Message $_.Exception
+                throw $_.Exception
+            }
+    }
+
+function postToTeams ([string]$teamsMessage)
+{
+    try
+        {
+            $uri = Get-AutomationVariable -Name 'TeamsURI' 
+            $payload1 = @{
+                 "text" = $teamsMessage
+            }
+            $json1 = ConvertTo-Json $payload1    
+            Invoke-RestMethod -uri $uri -Method Post -body $json1 -ContentType 'Application/Json'
+        }
+    Catch
+        {
+            $ErrorMessage = $_.Exception.Message
+            $FailedItem = $_.Exception.ItemName
+            Write-Error "We failed to read $FailedItem. The error message was $ErrorMessage"
+            Break
+        }   
+}
+     
+function AzureAvisorPost 
+{
+    $cost = 0
+    $highavailability = 0
+    $performance = 0
+    $security = 0
+    $OperationalExcellence = 0
+
+    $results = Get-AzAdvisorRecommendation
+    foreach ($result in $results)
+    {
+        switch ($result.category)
+        {       
+            "Cost" 
+                {
+                    $cost += 1 
+                }
+            "HighAvailability"
+                {
+                    $HighAvailability += 1
+                }
+            "Performance" 
+                {
+                    $performance += 1
+                }
+            "Security"
+                {
+                   if ($resut.Impact -ne "Low")
+                   {
+                       $security += 1
+                   }   
+                }
+            "OperationalExcellence"
+                {
+                    $OperationalExcellence += 1
+                }
+        }
+    }
+    $out = "Azure Advisor has " + $cost + " cost, " + $highavailability + " high availability, " + $performance + " performance, " + $security + " security and " + $OperationalExcellence + " operational excellence recommendations. "
+    $out = $out + "Consult the <a href='https://portal.azure.com/#blade/Microsoft_Azure_Expert/AdvisorMenuBlade/overview'>Advisor blade menu</a> for details"
+    postToTeams ($out)
+}
+
+loginAzure
+AzureAvisorPost
+
+ 

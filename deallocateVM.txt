@@ -1,0 +1,57 @@
+<#
+    .DESCRIPTION
+        Deallocates VMs after they've been shut down, but not deallocated.
+
+        Schedule-run, half-hourly
+    
+    .NOTES
+        AUTHOR: Alex Imray Papineau
+        LAST EDIT: 13 February  2020
+        EDITOR: Alex Imray Papineau
+#>
+
+Param(
+    [Parameter(Mandatory = $false)]
+    [string] $RGName = ""
+)
+
+# Prevents runbook from continuing execution if there's an error - Alex
+$ErrorActionPreference = "Stop"
+
+# Logging in -> Get connection and use for Az login
+$Connection = Get-AutomationConnection -Name "AzureRunAsConnection"
+$AzureProfile = Connect-AzAccount `
+    -Tenant $Connection.TenantId `
+    -CertificateThumbprint $Connection.CertificateThumbprint `
+    -ApplicationId $Connection.ApplicationId `
+    -ServicePrincipal
+$AzureProfile.Context.Subscription
+
+function Update-VM($VMtoCheck)
+{
+    $VMInstance = Get-AzVM -ResourceGroupName $VMtoCheck.ResourceGroupName `
+        -Name $VMtoCheck.Name -Status
+
+    if ($VMInstance.Statuses.Count -lt 2)
+    { exit }
+
+    if ($VMInstance.Statuses[1].DisplayStatus -eq "VM stopped")
+    {
+        Stop-AzVM -Id $VMtoCheck.Id -Force -AsJob | Out-Null
+        "Deallocating VM '{0}'" -f $VMtoCheck.Name
+    }
+}
+
+if ($RGName -eq "")
+{ $SubVMs = @(Get-AzVM) }
+else
+{ $SubVMs = @(Get-AzVM -ResourceGroupName $RGName ) }
+
+$VMNames = ""
+foreach ($VM in $SubVMs)
+{ $VMNames += "`n  " + $VM.Name }
+"Found {0} VM(s) to process. Checking...{1}" `
+    -f $SubVMs.Count, $VMNames
+
+foreach ($VM in $SubVMs)
+{ Update-VM -VMtoCheck $VM }

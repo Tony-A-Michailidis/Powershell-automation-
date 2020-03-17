@@ -1,0 +1,101 @@
+ <#
+    .DESCRIPTION
+       Attempts to search the log and find any storage account that hasn't had a "Regenerate Storage Account Keys" 
+       operation performed for more than 90 days, piles all those storage accounts in a list along with the contact
+       name listed in the account and posts them in the related alerts Teams Channel. The idea is to inform the owners
+       of these storage accounts to go regenerate their keys (in a PB environment they'll have to anyways). 
+
+    .PARAMETER none
+   
+    .NOTES
+        AUTHOR: Tony Michailidis
+        LAST EDIT: 8 Feb 2020
+        EDITOR: Tony Mchailidis
+#>
+
+function loginAzure
+{
+    $connectionName = "AnalyticsConnection"
+    try
+        {
+            $servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
+            "Logging in to Azure..."
+            $azureaccount = Add-AzureRmAccount `
+                -ServicePrincipal `
+                -TenantId $servicePrincipalConnection.TenantId `
+                -ApplicationId $servicePrincipalConnection.ApplicationId `
+                -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+        }
+    catch 
+        {
+            if (!$servicePrincipalConnection)
+            {
+                $ErrorMessage = "Connection $connectionName not found."
+                throw $ErrorMessage
+            } 
+            else
+            {
+                Write-Error -Message $_.Exception
+                throw $_.Exception
+            }
+        }
+}
+
+function postToTeams ([string]$teamsMessage)
+{
+    try
+        {
+            $uri = Get-AutomationVariable -Name 'TestURI'
+            $payload1 = @{
+                "text" = $teamsMessage
+            }
+            $json1 = ConvertTo-Json $payload1    
+            Invoke-RestMethod -uri $uri -Method Post -body $json1 -ContentType 'Application/Json'
+        }
+    Catch
+        {
+            $ErrorMessage = $_.Exception.Message
+            $FailedItem = $_.Exception.ItemName
+            Write-Error "We failed to read $FailedItem. The error message was $ErrorMessage"
+            Break
+        }   
+}
+
+function Get-ParsedResult {
+param ( [Parameter(Mandatory=$true)] [System.Object] $Results )
+    $b = 0
+    foreach ($row in $Results.'<>3__rows')  
+    {
+        $b = $row.Count    # since you are getting back a Count there should be only 1 row 
+    }
+    Return ( $b )
+}
+
+
+function GetOutofDateKeyStorageAccounts
+{
+    $body = $null
+    $queryResults = $null
+    $bbody = $null
+    $alldisks = Get-AzureRmStorageAccount
+    $alldisks
+    foreach ($disk in $alldisks)
+    {
+        $qq = "AzureActivity | where OperationName == 'Regenerate Storage Account Keys' | where ActivityStatusValue == 'Succeeded'| where Resource == '"+$disk.StorageAccountName+"'" 
+        $queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query $qq -Timespan (New-TimeSpan -Days 90)
+        $queryResults = $queryResults.results
+        $body = 0
+        $body = (Get-ParsedResult -Results $queryResults)
+        If ($body -eq 0) 
+        {
+            $ResourceId = $disk.id
+            $storagepath = "`n" + "-<a href='https://portal.azure.com/#@086gc.onmicrosoft.com/resource"+$ResourceId+"/overview'>" + $disk.StorageAccountName + "</a>`n`n"          
+            $bbody += $storagepath
+        }
+    }
+    postToTeams ("The following Azure Storage Accounts haven't had their keys regenerated for more than 90 days:`n`n"+$bbody+"`n`nAdvise owners to regenerate their keys and infrorm their teams.") 
+}
+
+loginAzure
+GetOutofDateKeyStorageAccounts
+

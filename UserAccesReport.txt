@@ -1,0 +1,110 @@
+<#
+    .DESCRIPTION
+    Template/example to get stuff from the logs and write to file, change query and whatever in quotes needs changing...
+    I keep the key in the vault instead of getting it directly from the storage account, reason: sometimes we may not be able to 
+    control access to the keys directly from the storage account and the storage account keys in the storage account have no expiry date
+    but the vault secrets have the option to add that so we do add expiry dates there. 
+    
+    Still needs work, this is just to make sure we have enough evidence for the SA&A, i.e. that we can do that report, not necessarily we want
+    to, since it is an expensive query. 
+
+    .PARAMETER none
+   
+    .NOTES
+        AUTHOR: Tony Michailidis
+        LAST EDIT: 28 Feb 2020
+        EDITOR: Tony Mchailidis
+#>
+
+function loginAzure 
+{
+    $connectionName = "AzureRunAsConnection"
+    try
+        {
+            $servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
+            "Logging in to Azure..."
+            $azureaccount = Add-AzureRmAccount `
+            -ServicePrincipal `
+            -TenantId $servicePrincipalConnection.TenantId `
+            -ApplicationId $servicePrincipalConnection.ApplicationId `
+            -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+        }
+    catch 
+        {
+            if (!$servicePrincipalConnection)
+                {
+                    $ErrorMessage = "Connection $connectionName not found."
+                    throw $ErrorMessage
+                } 
+            else
+                {
+                    Write-Error -Message $_.Exception  
+                    throw $_.Exception
+                }
+       }
+}
+
+function writeToFile ($filecontents)
+{ 
+    # will fix parameters to pass all these strings later... 
+    try
+        {
+            # get a new unique GUID for the file name plus dot csv for easy excel work after
+            $guid = New-Guid
+            $guidString =$guid.ToString()
+            $LogFull = "$guidString.csv" 
+
+            # get the key stored as a secret in the vault and send the file to the storage container 
+            $LogItem = New-Item -ItemType File -Name $LogFull
+            $filecontents | Out-File -FilePath $LogFull -Append
+            $acctKey =  (Get-AzureKeyVaultSecret -vaultName "mgmt-valut" -name "runbookstoragekey").SecretValueText
+            # "Key: " + $acctKey #debug
+            $storageContext = New-AzureStorageContext -StorageAccountName "cloudmgmtprod" -StorageAccountKey  $acctKey
+            # "Storage context: " + $storageContext #debug
+            Set-AzureStorageBlobContent -File $LogFull -Container "runbookoutputs" -BlobType "Block" -Context $storageContext -Verbose
+        }
+    Catch
+        {
+            $ErrorMessage = $_.Exception.Message
+            $FailedItem = $_.Exception.ItemName
+            Write-Error "We failed to read $FailedItem. The error message was $ErrorMessage"
+            Break
+        }   
+}
+
+function Get-ParsedResult 
+{
+    param ( [Parameter(Mandatory=$true)] [System.Object] $Results )
+    $b = ""
+    foreach ($row in $Results.'<>3__rows') 
+    {
+        $b += $row.Computer + ", " + $row.DisplayName #xample if you don't want tne entire row
+    }
+    Return ($b)
+}
+  
+
+loginAzure
+$allRG = Get-AzureRmResourceGroup 
+$results = ""
+$resultsperresource = "" 
+foreach ($g in $allRG)
+{
+    $allres = Get-AzureRmResource -ResourceGroupName $g.ResourceGroupName 
+    foreach ($r in $allres)
+    {        
+        $resultsperresource += Get-AzureRmRoleAssignment -ResourceGroupName $g.ResourceGroupName -ResourceName $r.name 
+    }
+    $resultsperresource
+    $results += $resultsperresource
+    $resultsperresource = ""
+}
+
+writeToFile ($results)
+
+# Get-AzRoleAssignment -ResourceGroupName "" 
+# Get-AzRoleAssignment -SignInName ""
+# $Conn = Get-AutomationConnection -Name 'AnalyticsConnection'
+# $null1 = Add-AzureRMAccount -ServicePrincipal -Tenant $Conn.TenantID -ApplicationID $Conn.ApplicationID -CertificateThumbprint $Conn.CertificateThumbprint 
+
+

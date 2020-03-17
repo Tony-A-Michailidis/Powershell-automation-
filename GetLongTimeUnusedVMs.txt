@@ -1,0 +1,96 @@
+ <#
+    .DESCRIPTION
+        The limit has been set to 90 days - see script - if a VM is de-allocated for that long then something is up... so we flag it and advice to contact the owner
+        to see if they still need it or its there to collect azure dust - lol. Even though it doesn't accumulate any costs, the disk may still be billed if its large and
+        it may occupy an IP needed elsewhere or an exta NIC or an NSG that may not be required and still charges $ for it. All such VMs are posted, if found, in the
+        related Teams channel. 
+
+    .PARAMETER none
+   
+    .NOTES
+        AUTHOR: Tony Michailidis
+        LAST EDIT: 22 Oct 2019
+        EDITOR: Tony Mchailidis
+#>
+function postToTeams ([string]$teamsMessage)
+{
+    try
+        { 
+            $uri = Get-AutomationVariable -Name 'TeamsURI'  
+            $uri = [uri]::EscapeUriString($uri)         
+            $payload1 = @{
+            "text" = $teamsMessage
+            }
+            $json1 = ConvertTo-Json $payload1   
+            Invoke-RestMethod -uri $uri -Method Post -body $json1 -ContentType 'Application/Json'
+        }
+    Catch
+        {
+            $ErrorMessage = $_.Exception.Message
+            $FailedItem = $_.Exception.ItemName
+            Write-Error "We failed to read $FailedItem. The error message was $ErrorMessage"
+            Break
+        }   
+}
+
+function loginAzure {
+
+$connectionName = "AzureRunAsConnection"
+try
+    {
+        $servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
+        "Logging in to Azure..."
+        $azureaccount = Add-AzureRmAccount `
+            -ServicePrincipal `
+            -TenantId $servicePrincipalConnection.TenantId `
+            -ApplicationId $servicePrincipalConnection.ApplicationId `
+            -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+    }
+catch 
+    {
+        if (!$servicePrincipalConnection)
+        {
+            $ErrorMessage = "Connection $connectionName not found."
+            throw $ErrorMessage
+        } 
+        else
+        {
+            Write-Error -Message $_.Exception
+            throw $_.Exception
+        }
+    }
+}
+
+function GetLongTimeUnusedVMs
+{   
+    $body = $null
+    $CurrrentSub = (Get-AzureRmContext).Subscription
+    $CurrentSubId = $CurrrentSub.id
+    $subname = $CurrrentSub.name
+    $VMs = Get-AzureRmVm -Status | select ResourceGroupName, Name, PowerState, ID 
+    foreach ($vm in $VMs)
+    { 
+        if ($vm.PowerState -eq "VM deallocated")
+            {   
+                $q = "AzureActivity | where ResourceId == '" + $vm.ID + "' | where OperationName == 'Deallocate Virtual Machine' | where EventSubmissionTimestamp < now()-90d | summarize by format_datetime(TimeGenerated, 'MM-dd-yyyy') | order by TimeGenerated desc"                           
+                $queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "4a6c7711-a47a-4b24-b886-8afb3bcd194d" -Query $q -Timespan (New-TimeSpan -Days 300)
+                $resultsArray = $null 
+                $resultsArray = [System.Linq.Enumerable]::ToArray($queryResults.Results)
+                If ($resultsArray -ne $null)
+                {
+                    $ResourceId = "/subscriptions/" + $CurrentSubId + "/resourceGroups/" + $VM.ResourceGroupName + "/providers/Microsoft.Compute/virtualMachines/" + $vm.name 
+                    $vmpath = "<a href='https://portal.azure.com/#@086gc.onmicrosoft.com/resource"+$ResourceId+"'>" + $vm.name + "</a>"
+                    $body = $body + "`n- " + $vmpath + " since " + $resultsArray[0].TimeGenerated + "`n" 
+                }    
+            }
+    } 
+    if ($body -ne $null)
+    {
+        $body = "The following VM(s) have been de-allocated longer than 90 days in the **"+$subname+ "** subscription: `n" + $body + "`nDate format: mm-dd-yyyy. Please advise owners since allocated cores affect our available quota."
+        "**Debug:** " + $body
+        postToTeams($body)
+    }
+}    
+
+loginAzure
+GetLongTimeUnusedVMs

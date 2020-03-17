@@ -1,0 +1,130 @@
+$connection = Get-AutomationConnection -Name "AzureRunAsConnection"
+$azureProfile = Connect-AzAccount `
+    -Tenant $connection.TenantId `
+    -CertificateThumbprint $connection.CertificateThumbprint `
+    -ApplicationId $connection.ApplicationId `
+    -ServicePrincipal
+
+$AutomationAccount = "Training-Automation";
+$ResourceGroupName = "Training-RG"
+$TagName = "autoupdate"
+
+$scope = "/subscriptions/$((Get-AzContext).subscription.id)"
+$QueryScope = @($scope)
+
+$daysOfWeek = @{
+    'sun' = [System.DayOfWeek]::Sunday;
+    'mon' = [System.DayOfWeek]::Monday;
+    'tue' = [System.DayOfWeek]::Tuesday;
+    'wed' = [System.DayOfWeek]::Wednesday;
+    'thu' = [System.DayOfWeek]::Thursday;
+    'fri' = [System.DayOfWeek]::Friday;
+    'sat' = [System.DayOfWeek]::Saturday;
+}
+
+$redeploy = $True;
+
+$schedule_tags = Get-AzTag -Name $TagName;
+
+function CreateDeployment($name, $schedule_tag, [System.DayOfWeek]$day, $QueryScope, $AutomationAccount, $ResourceGroupName)
+{
+    $tag = @{$TagName=$schedule_tag.Name};
+
+    $azq = New-AzAutomationUpdateManagementAzureQuery -ResourceGroupName $ResourceGroupName `
+        -AutomationAccountName $AutomationAccount `
+        -Scope $QueryScope `
+        -Tag $tag
+    
+    $AzureQueries = @($azq)
+
+    $date = Get-Date;
+    while($date.DayOfWeek -ne $day) {
+        $date = $date.AddDays(1);
+    }
+    $time = $schedule_tag.Name.Split('_')[1];
+
+    $duration = New-TimeSpan -Hours 2
+
+    $startTime = [DateTimeOffset]($date.ToString("yyyy-MM-dd") + "T" + $time + ":00")
+
+    [System.DayOfWeek[]]$weekDays = @($day)
+
+    Write-Output "Debug";
+    Write-Output $startTime;
+    Write-Output $weekDays;
+
+    try {
+        $schedule = New-AzAutomationSchedule -ResourceGroupName $ResourceGroupName `
+            -AutomationAccountName $AutomationAccount `
+            -Name $name `
+            -StartTime $startTime `
+            -DaysOfWeek $weekDays `
+            -TimeZone "UTC" `
+            -WeekInterval 1 `
+            -ForUpdateConfiguration
+            
+        if($name -like "Linux_*") {
+            New-AzAutomationSoftwareUpdateConfiguration -ResourceGroupName $ResourceGroupName `
+                -AutomationAccountName $AutomationAccount `
+                -Schedule $schedule `
+                -Linux `
+                -Azurequery $AzureQueries `
+                -IncludedPackageClassification Unclassified, Critical, Security, Other `
+                -Duration $duration `
+                -PreTaskRunbookName "UpdateManagement-TurnOnVms" `
+                -PostTaskRunbookName "UpdateManagement-TurnOffVms"
+        }
+        else {
+            New-AzAutomationSoftwareUpdateConfiguration -ResourceGroupName $ResourceGroupName `
+                -AutomationAccountName $AutomationAccount `
+                -Schedule $schedule `
+                -Windows `
+                -Azurequery $AzureQueries `
+                -IncludedUpdateClassification Critical,Security,Updates,UpdateRollup,Definition `
+                -Duration $duration `
+                -PreTaskRunbookName "UpdateManagement-TurnOnVms" `
+                -PostTaskRunbookName "UpdateManagement-TurnOffVms" `
+                -RebootOnly
+        }
+    }
+    catch
+    {
+        Write-Output $_
+    }
+}
+
+foreach($schedule_tag in $schedule_tags.values)
+{
+    if($schedule_tag.Name.toLower() -match "^(mon|tue|wed|thu|fri|sat|sun)_([01]?[0-9]|2[0-3]):[0-5][05]$" -And $schedule_tag.Name.toLower())
+    {
+        $schedule_tag.Name;
+        
+        $day = $daysOfWeek[$schedule_tag.Name.Split('_')[0]];
+
+        $nameLinux = "Linux_" + $daysOfWeek[$schedule_tag.Name.Split('_')[0]].toString() + "_" + $schedule_tag.Name.Split('_')[1].Replace(':', '_');
+        $nameWindows = "Windows_" + $daysOfWeek[$schedule_tag.Name.Split('_')[0]].toString() + "_" + $schedule_tag.Name.Split('_')[1].Replace(':', '_');
+
+        $nixUpdateConfig = Get-AzAutomationSoftwareUpdateConfiguration -ResourceGroupName $ResourceGroupName -AutomationAccountName $AutomationAccount | Where-Object { $_.Name -eq $nameLinux }
+        $winUpdateConfig = Get-AzAutomationSoftwareUpdateConfiguration -ResourceGroupName $ResourceGroupName -AutomationAccountName $AutomationAccount | Where-Object { $_.Name -eq $nameWindows }
+
+        $osTypes = (Get-AzResource -TagName $TagName -TagValue $schedule_tag.Name | Get-AzVM).StorageProfile.OSDisk.OsType;
+
+        if($osTypes -Contains "Linux" -And (!$nixUpdateConfig -or $redeploy))
+        {
+            CreateDeployment -name $nameLinux -schedule_tag $schedule_tag -day $day -QueryScope $QueryScope -AutomationAccount $AutomationAccount -ResourceGroupName $ResourceGroupName
+        }
+        if($osTypes -notcontains "Linux" -And $nixUpdateConfig)
+        {
+            $nixUpdateConfig | Remove-AzAutomationSoftwareUpdateConfiguration
+        }
+
+        if($osTypes -Contains "Windows" -And (!$winUpdateConfig -or $redeploy))
+        {
+            CreateDeployment -name $nameWindows -schedule_tag $schedule_tag -day $day -QueryScope $QueryScope -AutomationAccount $AutomationAccount -ResourceGroupName $ResourceGroupName
+        }
+        if($osTypes -NotContains "Windows" -And $winUpdateConfig)
+        {
+            $winUpdateConfig | Remove-AzAutomationSoftwareUpdateConfiguration
+        }
+    }
+}

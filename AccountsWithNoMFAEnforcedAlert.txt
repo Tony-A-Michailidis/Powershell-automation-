@@ -1,0 +1,90 @@
+<#
+    .DESCRIPTION
+        Returns a list of users with no MFA enforced. The Connect-MsolService will require a login/password (can't do it with a service principle, unless you have figured it out!) so it will trigger 
+        the MFA for the login admin user. So this is a script you copy and paste in your Powershell on your desktop to run and get results. 
+    
+    .PARAMETER none
+   
+    .NOTES
+        AUTHOR: Tony Michailidis
+        LAST EDIT: 3 Nov 2019
+        EDITOR: Tony Mchailidis
+        Inspired by: https://social.msdn.microsoft.com/Forums/security/en-US/ca7bf582-f4c2-4eee-9af7-63bb239c9a34/how-to-get-the-report-of-users-that-have-enabled-but-not-enforced-for-azure-multifactor?forum=windowsazureactiveauthentication
+ #>
+ 
+$User =  Get-AutomationVariable -Name 'MSolServiceUserName' #add this and the next in the var list of the account
+$Pass = Get-AutomationVariable -Name 'MSolServiceUserPass'
+$PWord = ConvertTo-SecureString -String $Pass -AsPlainText -Force
+$Credential = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $User, $PWord
+
+try
+    {
+        Connect-MsolService  -Credential $Credential  #won't work, latest issue is some "proxy error" that somehow doesn't show using local powershell... 
+    }
+catch 
+    { 
+        Write-Error -Message $_.Exception
+        throw $_.Exception
+    }
+     
+$exclusionList = @(Get-AutomationVariable -Name 'exclusionList')
+
+$allUsers = Get-MsolUser -All | Where-Object -Property UserPrincipalName -NotIn $exclusionList
+$auth = New-Object -TypeName Microsoft.Online.Administration.StrongAuthenticationRequirement
+$allUsers | 
+ForEach-Object {
+    if ($_.StrongAuthenticationRequirements.State -ne "Enforced")
+    {
+        Write-Host "$($_.DisplayName) (ObjectId=$($_.ObjectId))"  # or adjust to send output formatted to Teams using examplease of other runbooks in this and the other automation accounts we have. 
+    }
+    
+}
+
+<#
+
+Toronto azure data center IP addresses, just in case we can exclude them from the MFA, attempts to do so have failed and MFA still kicks in! 
+
+13.71.160.0/19,
+13.88.224.0/19,
+13.104.151.192/26,
+13.104.152.0/25,
+20.38.114.0/25,
+20.38.144.0/21,
+20.39.128.0/20,
+20.43.0.0/19,
+20.150.16.0/24,
+20.150.31.0/24,
+20.190.139.0/25,
+20.190.161.0/24,
+40.79.216.0/24,
+40.80.44.0/22,
+40.82.160.0/19,
+40.85.192.0/18,
+40.90.17.144/28,
+40.90.128.0/28,
+40.90.138.32/27,
+40.90.143.160/27,
+40.90.151.96/27,
+40.126.11.0/25,
+40.126.33.0/25,
+40.126.33.128/26,
+52.108.42.0/23,
+52.109.92.0/22,
+52.114.160.0/22,
+52.136.23.0/24,
+52.136.27.0/24,
+52.138.0.0/18,
+52.139.0.0/18,
+52.156.0.0/19,
+52.228.0.0/17,
+52.233.0.0/18,
+52.237.0.0/18,
+52.239.148.64/26,
+52.239.189.0/24,
+52.245.28.0/22,
+52.246.152.0/21,
+104.44.93.32/27,
+104.44.95.16/28
+#>
+
+

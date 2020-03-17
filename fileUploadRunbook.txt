@@ -1,0 +1,80 @@
+Param
+(
+    [parameter (Mandatory=$false)]
+    [object] $WebhookData,
+    [parameter (Mandatory=$false)]
+    $ChannelURL
+)
+# If runbook was called from Webhook, WebhookData will not be null.
+if ($WebhookData) {
+    Write-Output "RAW WEBHOOK DATA"
+    $WebhookData | FL *
+    # Parsing the RequestBody from the WebhookData.
+    $webhookBodyObject = ConvertFrom-Json -InputObject $WebhookData.RequestBody
+    $url = $webhookBodyObject.data.url
+    $artifactId = $url.split("/")[-1]
+    $uploadTime = $webhookBodyObject.eventTime
+    $formatedUploadTime = get-date -Format "dddd MM/dd/yyyy HH:mm K" -Date $uploadTime
+    $file = $webhookBodyObject.subject
+    $baseUrl = "https://dmp-prod-store.azurewebsites.net/prod-store-api/prodstore/"
+    $fileDownloadUri = $baseUrl + "files/" + $artifactId
+    $fileMappableUri = $baseUrl + "artifact/isMappable/" + $artifactId
+    $mappable = Invoke-RestMethod -Uri $fileMappableUri -Method "Get" 
+    if ($mappable.ToString() -eq "False") {
+        write-Output "The file is not mappable, skip."
+        return;
+    }
+    $fileNameUri = $baseUrl + "artifact/filename/" + $artifactId
+    $fileName = Invoke-RestMethod -Uri $fileNameUri -Method "Get"
+    #Post to MS Teams if the channel webhook is present.
+    if (! ([string]::IsNullOrEmpty($ChannelURL)))
+    {
+        $Body = ConvertTo-Json -Depth 4 @{
+        title = 'TADAP Geospatial Data Upload Notification'
+        text = 'A new geospatial data file is available for ingestion'
+        sections = @(
+            @{
+            activityTitle = 'TATAP Prod Store New File Upload Notification'
+            activitySubtitle = "A new mappable file named $fileName has been uploaded"
+            activityText = "ALERT: On $formatedUploadTime, the file is ready for process."
+            activityImage = "https://tdpdatadev.file.core.windows.net/king-share/dfo9.png"
+            }
+        )
+        potentialAction = @(@{
+            '@context' = 'http://schema.org'
+            '@type' = 'ViewAction'
+            name = 'Click here to download the file'
+            target = @($fileDownloadUri)
+            })
+        }
+
+        # call Teams webhook
+        Write-Output $Body
+        Invoke-RestMethod -Method "Post" -Uri $ChannelURL -Body $Body | Write-Verbose
+    }
+    #Write-Output $webhookBodyObject
+    $personlisation = @{
+        receiver='GIS DevOps'
+        file_name= $fileName
+        download_link = $fileDownloadUri
+        uploaded_time = $formatedUploadTime
+        reference_number = $artifactId
+    }
+    $notif_payload = $personlisation | ConvertTo-Json
+
+    # Send notification email using the GC notification service
+    
+    $notif_email = 'dfo.dmp_support-soutien_pgd.mpo@dfo-mpo.gc.ca'
+    $notif_email_url = "https://dmp-services-svc.azurewebsites.net/notification/1.0/prodstore/email?email=$notif_email"
+    Invoke-RestMethod $notif_email_url -Method Post -Body $notif_payload -ContentType 'application/json'
+
+    # Send notification sms using the GC notification service
+    $notif_phone = '343-550-0035'
+    $notif_sms_url = "https://dmp-services-svc.azurewebsites.net/notification/1.0/prodstore/sms?phone=$notif_phone"
+    Invoke-RestMethod $notif_sms_url -Method Post -Body $notif_payload -ContentType 'application/json'
+
+}
+else {
+    # Error
+    write-Error "No webhook data found."
+}

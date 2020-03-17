@@ -1,0 +1,89 @@
+<#
+    .DESCRIPTION
+        Retrieves and posts to Teams the critical updates that are missing from all VMs in the subscription. 
+
+    .PARAMETER none
+   
+    .NOTES
+        AUTHOR: Tony Michailidis
+        LAST EDIT: 10 March 2020
+        EDITOR: Tony Mchailidis
+#>
+
+function loginAzure 
+{
+    $connectionName = "AzureRunAsConnection"
+    try
+        {
+            $servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
+            "Logging in to Azure..."
+            $azureaccount = Add-AzureRmAccount `
+            -ServicePrincipal `
+            -TenantId $servicePrincipalConnection.TenantId `
+            -ApplicationId $servicePrincipalConnection.ApplicationId `
+            -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+        }
+    catch 
+        {
+            if (!$servicePrincipalConnection)
+                {
+                    $ErrorMessage = "Connection $connectionName not found."
+                    throw $ErrorMessage
+                } 
+            else
+                {
+                    Write-Error -Message $_.Exception  
+                    throw $_.Exception
+                }
+       }
+}
+
+function postToTeams ([string]$teamsMessage)
+{
+    try
+        {
+            $uri = Get-AutomationVariable -Name 'TeamsURI'
+            $payload1 = @{
+                "text" = $teamsMessage
+            }
+            $json1 = ConvertTo-Json $payload1    
+            Invoke-RestMethod -uri $uri -Method Post -body $json1 -ContentType 'Application/Json'
+        }
+    Catch
+        {
+            $ErrorMessage = $_.Exception.Message
+            $FailedItem = $_.Exception.ItemName
+            Write-Error "We failed to read $FailedItem. The error message was $ErrorMessage"
+            Break
+        }   
+}
+
+function Get-ParsedResult {
+param ( [Parameter(Mandatory=$true)] [System.Object] $Results )
+    $b = ""
+    foreach ($row in $Results.'<>3__rows') 
+    {
+        If ($row.SecurityUpdatesMissing -gt 1) 
+        {$b += "- <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> is missing " + $row.CriticalUpdatesMissing + " critical updates`n" }
+        else
+        {$b += "- <a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource" + $row.ResourceId + "'>" + $row.Resource + "</a> is missing " + $row.CriticalUpdatesMissing + " critical update`n" }
+    }
+    Return ( $b )
+}     
+  
+$Conn = Get-AutomationConnection -Name 'AnalyticsConnection'
+$null1 = Add-AzureRMAccount -ServicePrincipal -Tenant $Conn.TenantID -ApplicationID $Conn.ApplicationID -CertificateThumbprint $Conn.CertificateThumbprint 
+
+$queryResults = $null
+$body = $null
+
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'UpdateSummary  | where CriticalUpdatesMissing  != 0 | distinct Resource, CriticalUpdatesMissing, ResourceId' -Timespan (New-TimeSpan -Hours 24) 
+
+If ($queryResults.results -ne $null) 
+{
+    $queryResults = $queryResults.Results
+    $body = (Get-ParsedResult -Results $queryResults)
+    postToTeams ("The following VMs are missing critical updates: `n`n$body`n`nUpdate VMs, or enable update management if necessary")  
+}
+
+

@@ -1,0 +1,147 @@
+<#
+  .DESCRIPTION
+    Sets a virtual machine's state and tags based on the
+    tag-based schedule information and current running state.
+
+    Script-run, Get-VmSchedule.ps1
+
+  .NOTES
+    Version: 3.0
+    Author: Alex Imray Papineau
+    Last Edit: 10 March 2020
+    Editor: Alex Imray Papineau
+#>
+
+Param(
+  [Parameter(Mandatory = $true)]
+  [string] $VmName,
+  [Parameter(Mandatory = $true)]
+  [string] $VmRG,
+  [Parameter(Mandatory = $true)]
+  [bool] $IsRunning,
+  [Parameter(Mandatory = $true)]
+  [string] $ScheduleZone,
+  [Parameter(Mandatory = $false)]
+  [string] $StartupTime = "",
+  [Parameter(Mandatory = $false)]
+  [string] $ShutdownTime = ""
+)
+
+# Prevents runbook from continuing execution if there's an error - Alex
+$ErrorActionPreference = "Stop"
+
+$word1 = if ($IsRunning) { "(running)" } else { "(off)" }
+$word5 = if ("" -eq $ShutdownTime) { "N/A" } else { $ShutdownTime }
+$word4 = if ("" -eq $StartupTime) { "N/A" } else { $StartupTime }
+
+"VM '{0}' {1} in '{2}' is scheduled.`nSchedule in {3}, startup at {4}, shutdown at {5}" `
+  -f $VmName, $word1, $VmRG, $ScheduleZone, $word4, $word5
+
+# Logging in -> Get connection and use for Az login
+$connection = Get-AutomationConnection -Name "AzureRunAsConnection"
+$azureProfile = Connect-AzAccount `
+  -Tenant $connection.TenantId `
+  -CertificateThumbprint $connection.CertificateThumbprint `
+  -ApplicationId $connection.ApplicationId `
+  -ServicePrincipal
+
+try {
+  "Logged in to subscription '{0}'" `
+    -f $azureProfile.Context.Subscription.Name
+}
+catch {
+  "Logged in, but azure's being silly"
+}
+
+$schedMsg = "unspec."
+$actionsMsg = ""
+
+# Turn on or off vm based on schedule
+if ($ShutdownTime -ne "")
+{
+  # Get current time, vm-local time, shutdown time
+  $currentTime = Get-Date
+  $addHour = $false
+  if ($ScheduleZone.Contains("Daylight"))
+  {
+    $ScheduleZone = $ScheduleZone.Replace("Daylight", "Standard")
+    $addHour = $true
+  }
+  $vmTime = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId(`
+    $currentTime, $ScheduleZone)
+  if ($addHour)
+  { $vmTime = $vmTime.AddHours(1) }
+  "Current timzone time is {0}" -f $vmTime
+
+  $shutTime = [DateTime]$ShutdownTime
+  $dayDiff = $vmTime.Day - $shutTime.Day
+  $shutTime = $shutTime.AddDays($dayDiff)
+  "VM has shutdown time of {0}" -f $shutTime
+
+  # Currently weekend. VM should be off
+  if ($vmTime.DayOfWeek -eq "Saturday" -or `
+    $vmTime.DayOfWeek -eq "Sunday")
+  {
+    if ($IsRunning)
+    { 
+        Stop-AzVM -ResourceGroupName $VmRG `
+        -Name $VmName -Force -AsJob | Out-Null
+        $schedMsg += "dealloc."
+        $actionsMsg += "VM scheduled to be off (weekend). Turning off VM. "
+    }
+  }
+  # Schedule specified only by shutdown
+  elseif ($StartupTime -eq "")
+  {
+    if ($IsRunning)
+    {
+        if ($vmTime -gt $shutTime)
+        {
+        Stop-AzVM -ResourceGroupName $VmRG `
+            -Name $VmName -Force -AsJob | Out-Null
+        $schedMsg = "dealloc."
+        $actionsMsg += "VM scheduled to be off. Turning off VM. "
+        }
+    }
+  }
+  # Schedule specified by startup and shutdown
+  else
+  {
+    $startTime = [DateTime]$StartupTime
+    $dayDiff = $vmTime.Day - $startTime.Day
+    $startTime = $startTime.AddDays($dayDiff)
+    "VM has startup time of {0}" -f $startTime
+
+    if ($vmTime -gt $startTime -and `
+      $vmTime -lt $shutTime)
+    {
+      if (!$IsRunning)
+      {
+        Start-AzVM -ResourceGroupName $VmRG `
+          -Name $VmName -AsJob | Out-Null
+        $actionsMsg += "VM scheduled to be on. Turning on VM. "
+      }
+      $schedMsg = "running"
+    }
+    elseif ($vmTime -lt $startTime `
+      -or $vmTime -gt $shutTime)
+    {
+      if ($IsRunning)
+      {
+        Stop-AzVM -ResourceGroupName $VmRG `
+          -Name $VmName -Force -AsJob | Out-Null
+        $actionsMsg += "VM scheduled to be off. Turning off VM. "
+      }
+      $schedMsg = "dealloc."
+    }
+  }
+}
+
+# Target schedule message
+$schedMsg
+
+# Actions message
+if ($actionsMsg -eq "")
+{ "No actions" }
+else
+{ $actionsMsg }

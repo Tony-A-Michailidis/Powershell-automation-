@@ -1,0 +1,92 @@
+ <#
+    .DESCRIPTION
+       Retrieves from the logs all processes running on Linux flavor VMs, i.e. reports on  what are users running on VMs
+       from custom of COTS products installed. May need more work to point to other tables too, in the meantime it just
+       looks at the VMProcess of the Service Map. 
+
+       Needs work to either break down output into smaller chunks (24MB) so that Teams won't complain about
+       message being to big to display, or just write the entire query output to a storage. With the new and improved monitor this may be a 
+       bit of an overkill, unless someone wants to export stuff. 
+
+    .PARAMETER none
+   
+    .NOTES
+        AUTHOR: Tony Michailidis
+        LAST EDIT: 20 Feb 2020
+        EDITOR: Tony Mchailidis
+#>
+
+function loginAzure 
+{
+    $connectionName = "AzureRunAsConnection"
+    try
+        {
+            $servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
+            "Logging in to Azure..."
+            $azureaccount = Add-AzureRmAccount `
+            -ServicePrincipal `
+            -TenantId $servicePrincipalConnection.TenantId `
+            -ApplicationId $servicePrincipalConnection.ApplicationId `
+            -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+        }
+    catch 
+        {
+            if (!$servicePrincipalConnection)
+                {
+                    $ErrorMessage = "Connection $connectionName not found."
+                    throw $ErrorMessage
+                } 
+            else
+                {
+                    Write-Error -Message $_.Exception  
+                    throw $_.Exception
+                }
+       }
+}
+
+function postToTeams ([string]$teamsMessage)
+{
+    try
+        {
+            $uri = Get-AutomationVariable -Name 'TestURI'
+            $payload1 = @{
+                "text" = $teamsMessage
+            }
+            $json1 = ConvertTo-Json $payload1    
+            Invoke-RestMethod -uri $uri -Method Post -body $json1 -ContentType 'Application/Json'
+        }
+    Catch
+        {
+            $ErrorMessage = $_.Exception.Message
+            $FailedItem = $_.Exception.ItemName
+            Write-Error "We failed to read $FailedItem. The error message was $ErrorMessage"
+            Break
+        }   
+}
+
+function Get-ParsedResult {
+param ( [Parameter(Mandatory=$true)] [System.Object] $Results )
+    $b = ""
+    foreach ($row in $Results.'<>3__rows') 
+    {
+        $b += "- Process: '" + $row.Description + "', runs on computer " + "<a href='https://portal.azure.com/#@dfo-mpo.gc.ca/resource/" + $row._ResourceId + "'>" + $row.Computer + "</a> `n" 
+    }
+    Return ( $b )
+}
+  
+$Conn = Get-AutomationConnection -Name 'AnalyticsConnection'
+$null1 = Add-AzureRMAccount -ServicePrincipal -Tenant $Conn.TenantID -ApplicationID $Conn.ApplicationID -CertificateThumbprint $Conn.CertificateThumbprint 
+
+$queryResults = $null
+$body = $null
+$queryResults = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId "82b8783b-c1a7-48d1-9b6e-43941b0191fa" -Query 'VMProcess | distinct Computer , _ResourceId, Description' -Timespan (New-TimeSpan -Days 1) 
+
+If ($queryResults.results -ne $null) 
+{
+    $queryResults = $queryResults.Results
+    $body = (Get-ParsedResult -Results $queryResults)
+    postToTeams ("During the past 24h the following processes run on the following Linux flavor VMs in the production subscription`n`n$body`n`nPlease report to the Cloud Team any processes not listed above.")  
+  
+}
+
+
